@@ -67,6 +67,9 @@ class AaSessionProbe(
         private const val TAG = "AaSessionProbe"
         private const val SHUTDOWN_ACK_TIMEOUT_MS = 1_000L
         private const val SENSOR_NIGHT_MODE = 10L
+        private const val SENSOR_DRIVING_STATUS = 13L
+        /** DrivingStatus.UNRESTRICTED (0), what openauto sends: the car is treated as parked. */
+        private const val DRIVING_STATUS_UNRESTRICTED = 0
 
         @Volatile
         var active: AaSessionProbe? = null
@@ -500,6 +503,18 @@ class AaSessionProbe(
                 runCatching { channel.sendChannelSpecific(AaServiceDiscovery.CHANNEL_SENSOR, AaFraming.MSG_SENSOR_EVENT, batch) }
                     .onFailure { logger.log("SENSOR_EVENT send failed: $it") }
             }
+            // The driving-status sensor is advertised in service discovery but
+            // no value was ever sent, so Android Auto assumed the most
+            // restricted state and refused to show video apps (Fermata,
+            // CarStream). Report UNRESTRICTED like openauto does.
+            var drivingSensorStarted = false
+            fun sendDrivingStatus() {
+                val batch = AaProtobuf.Writer()
+                    .message(13, AaProtobuf.Writer().int(1, DRIVING_STATUS_UNRESTRICTED).build()) // driving_status_data
+                    .build()
+                runCatching { channel.sendChannelSpecific(AaServiceDiscovery.CHANNEL_SENSOR, AaFraming.MSG_SENSOR_EVENT, batch) }
+                    .onFailure { logger.log("SENSOR_EVENT driving status send failed: $it") }
+            }
             while ((running.get() || draining) && (everEstablished || index < config.maxMessages)) {
                 index++
                 if (System.currentTimeMillis() - lastPingSentAt > 5_000) {
@@ -508,6 +523,7 @@ class AaSessionProbe(
                     runCatching { channel.sendControlEncrypted(AaFraming.MSG_PING_REQUEST, ping) }
                         .onFailure { logger.log("proactive PING_REQUEST send failed: $it") }
                     if (nightSensorStarted) sendNightIfChanged()
+                    if (drivingSensorStarted) sendDrivingStatus()
                 }
                 val message = channel.receiveMessage()
                 if (message.channelId != AaFraming.CHANNEL_CONTROL) {
@@ -704,6 +720,10 @@ class AaSessionProbe(
                         if (sensorType == SENSOR_NIGHT_MODE) {
                             nightSensorStarted = true
                             sendNightIfChanged()
+                        } else if (sensorType == SENSOR_DRIVING_STATUS) {
+                            drivingSensorStarted = true
+                            logger.log("TX SENSOR_EVENT driving_status=UNRESTRICTED")
+                            sendDrivingStatus()
                         }
                     }
                     continue
